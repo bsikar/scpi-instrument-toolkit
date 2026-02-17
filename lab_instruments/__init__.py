@@ -10,6 +10,7 @@ from .src.rigol_dho804 import Rigol_DHO804
 from .src.matrix_mps6010h import MATRIX_MPS6010H
 from .src.owon_xdm1041 import Owon_XDM1041
 from .src.jds6600_generator import JDS6600_Generator
+from .src.keysight_edu33212a import Keysight_EDU33212A
 from .src.terminal import ColorPrinter
 from .src.discovery import InstrumentDiscovery, find_all
 
@@ -23,6 +24,7 @@ __all__ = [
     "MATRIX_MPS6010H",
     "Owon_XDM1041",
     "JDS6600_Generator",
+    "Keysight_EDU33212A",
     "ColorPrinter",
     "InstrumentDiscovery",
     "find_all",

@@ -15,6 +15,7 @@ from .rigol_dho804 import Rigol_DHO804
 from .matrix_mps6010h import MATRIX_MPS6010H
 from .owon_xdm1041 import Owon_XDM1041
 from .jds6600_generator import JDS6600_Generator
+from .keysight_edu33212a import Keysight_EDU33212A
 
 
 class InstrumentDiscovery:
@@ -32,6 +33,7 @@ class InstrumentDiscovery:
         "MPS-6010H-1C": MATRIX_MPS6010H,
         "XDM1041": Owon_XDM1041,
         "JDS6600": JDS6600_Generator,
+        "EDU33212A": Keysight_EDU33212A,
     }
 
     # Friendly names for the instruments (use generic names)
@@ -44,19 +46,9 @@ class InstrumentDiscovery:
         "MPS-6010H-1C": "psu",      # Generic name
         "XDM1041": "dmm",           # Generic name
         "JDS6600": "awg",
+        "EDU33212A": "awg",
     }
 
-    # Backup names if there's a conflict (multiple devices of same type)
-    FALLBACK_NAMES = {
-        "4063": "awg_bk",
-        "MSO2024": "scope_tek",
-        "DHO804": "scope_rigol",
-        "E3631A": "psu_hp",
-        "34401A": "dmm_hp",
-        "MPS-6010H-1C": "psu_matrix",
-        "XDM1041": "dmm_owon",
-        "JDS6600": "awg_jds",
-    }
 
     def __init__(self):
         self.rm = pyvisa.ResourceManager()
@@ -168,7 +160,13 @@ class InstrumentDiscovery:
                 ColorPrinter.error(f"Unexpected error listing resources: {e}")
             return {}
 
-        found_drivers = {}
+        # Use temp keys during scan so we know the full count before naming.
+        # Temp key format: "__awg_0", "__awg_1", etc. (double-underscore prefix).
+        # After the loop we rename based on total count per type:
+        #   1 device  → "awg"
+        #   2+ devices → "awg1", "awg2", "awg3", ...
+        found_drivers: Dict[str, Any] = {}
+        type_counts: Dict[str, int] = {}
 
         for resource in resources:
             # Skip Bluetooth and other virtual serial ports that often hang
@@ -221,16 +219,10 @@ class InstrumentDiscovery:
                 matched = False
                 for model_key, driver_class in self.MODEL_MAP.items():
                     if model_key in idn:
-                        friendly_name = self.NAME_MAP[model_key]
-
-                        # Handle naming conflicts (multiple devices of same type)
-                        if friendly_name in found_drivers:
-                            # Use fallback name if primary name is already taken
-                            friendly_name = self.FALLBACK_NAMES.get(model_key, f"{friendly_name}_2")
-                            if verbose:
-                                ColorPrinter.warning(
-                                    f"  -> Name conflict detected, using '{friendly_name}'"
-                                )
+                        generic = self.NAME_MAP[model_key]
+                        idx = type_counts.get(generic, 0)
+                        temp_key = f"__{generic}_{idx}"
+                        type_counts[generic] = idx + 1
 
                         # We found a match! Initialize the specific driver.
                         # Note: We close the raw instance first, let the driver handle connection.
@@ -238,14 +230,14 @@ class InstrumentDiscovery:
 
                         if verbose:
                             ColorPrinter.success(
-                                f"  -> Identified as {friendly_name.upper()} ({model_key})"
+                                f"  -> Identified as {generic.upper()} #{idx + 1} ({model_key})"
                             )
 
                         try:
-                            # Instantiate the driver
+                            # Instantiate the driver (store under temp key for now)
                             driver = driver_class(resource)
                             driver.connect()
-                            found_drivers[friendly_name] = driver
+                            found_drivers[temp_key] = driver
                             matched = True
                         except Exception as e:
                             if verbose:
@@ -269,13 +261,32 @@ class InstrumentDiscovery:
                         print(f"{ColorPrinter.RED}No response{ColorPrinter.RESET}")
                 continue
 
-        self.found_devices = found_drivers
+        # Post-process: rename from temp keys to final friendly names.
+        # 1 device of a type  → "awg"
+        # 2+ devices of a type → "awg1", "awg2", "awg3", ...
+        final_drivers: Dict[str, Any] = {}
+        for generic, total in type_counts.items():
+            for idx in range(total):
+                temp_key = f"__{generic}_{idx}"
+                if temp_key not in found_drivers:
+                    continue  # driver failed to initialize
+                if total == 1:
+                    final_name = generic
+                else:
+                    final_name = f"{generic}{idx + 1}"
+                final_drivers[final_name] = found_drivers[temp_key]
+
+        if verbose:
+            for final_name, driver in final_drivers.items():
+                ColorPrinter.info(f"  Assigned name: '{final_name}'")
+
+        self.found_devices = final_drivers
 
         if verbose:
             print("\n")
-            if found_drivers:
+            if final_drivers:
                 ColorPrinter.success(
-                    f"Discovery Complete. Found {len(found_drivers)} instruments."
+                    f"Discovery Complete. Found {len(final_drivers)} instruments."
                 )
             else:
                 ColorPrinter.warning(
@@ -283,16 +294,46 @@ class InstrumentDiscovery:
                 )
             print("-" * 60)
 
-        return found_drivers
+        return final_drivers
 
     def get(self, name: str) -> Optional[Any]:
-        """Get an initialized driver by friendly name ('scope', 'psu', 'awg', 'dmm')."""
-        # Check user input is valid
-        if name not in self.NAME_MAP.values():
+        """Get an initialized driver by its assigned name.
+
+        Valid names are whatever was assigned during scan() — e.g. 'awg', 'awg1',
+        'awg2', 'scope', 'scope1', 'psu', 'dmm', or any custom name set via rename().
+        Call list_devices() to see all available names after a scan.
+        """
+        if name not in self.found_devices:
+            available = list(self.found_devices.keys()) or ["(none found — run scan() first)"]
             raise ValueError(
-                f"Invalid instrument name '{name}'. Valid names are: {list(self.NAME_MAP.values())}"
+                f"No instrument named '{name}'. Available: {available}"
             )
-        return self.found_devices.get(name)
+        return self.found_devices[name]
+
+    def list_devices(self) -> Dict[str, Any]:
+        """Return all discovered instruments as a dict of name → driver instance."""
+        return dict(self.found_devices)
+
+    def rename(self, old_name: str, new_name: str) -> None:
+        """Rename a discovered instrument to a custom name.
+
+        Args:
+            old_name (str): Current name (e.g. 'awg1').
+            new_name (str): Desired name (e.g. 'awg_xyz').
+
+        Raises:
+            ValueError: If old_name does not exist or new_name is already in use.
+        """
+        if old_name not in self.found_devices:
+            available = list(self.found_devices.keys()) or ["(none — run scan() first)"]
+            raise ValueError(
+                f"No instrument named '{old_name}'. Available: {available}"
+            )
+        if new_name in self.found_devices:
+            raise ValueError(
+                f"Name '{new_name}' is already in use by another instrument."
+            )
+        self.found_devices[new_name] = self.found_devices.pop(old_name)
 
 
 def find_all(verbose=True) -> Dict[str, Any]:

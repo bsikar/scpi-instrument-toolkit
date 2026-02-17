@@ -50,6 +50,24 @@ AWG_WAVE_KEYS = {
     "symmetry": "symmetry",
 }
 
+# Maps user-friendly waveform names → canonical SCPI abbreviations used by SCPI AWGs
+AWG_WAVE_ALIASES = {
+    "sine":     "SIN",
+    "sin":      "SIN",
+    "square":   "SQU",
+    "squ":      "SQU",
+    "ramp":     "RAMP",
+    "triangle": "RAMP",
+    "tri":      "RAMP",
+    "pulse":    "PULS",
+    "puls":     "PULS",
+    "noise":    "NOIS",
+    "nois":     "NOIS",
+    "dc":       "DC",
+    "arb":      "ARB",
+    "prbs":     "PRBS",
+}
+
 DMM_MODE_ALIASES = {
     "vdc": "dc_voltage",
     "vac": "ac_voltage",
@@ -81,8 +99,7 @@ class InstrumentRepl(cmd.Cmd):
         self._dmm_text_index = 0
         self._dmm_text_delay = 0.2
         self._dmm_text_last = 0.0
-        # Device type preferences (psu -> psu/psu_matrix, dmm -> dmm/dmm_owon)
-        self._device_type_prefs: Dict[str, str] = {}
+        self._device_override: Optional[str] = None  # set by default() for awg1, scope2, etc.
         self._cleanup_done = False
 
         print("Scanning for instruments... (Ctrl+C to cancel)")
@@ -159,78 +176,39 @@ class InstrumentRepl(cmd.Cmd):
         """
         Resolve a generic device type to a specific device instance.
 
-        - If only one device of that type exists, return it automatically
-        - If multiple exist, check preference or ask user
-        - If user specifies a preference, store it
+        Discovers candidates dynamically by matching device names against the
+        pattern ^<type>\\d*$ so awg, awg1, awg2, scope, scope1, psu, dmm, etc.
+        all work.  If a specific device was pre-selected via default() routing
+        (e.g. the user typed 'awg1 wave ...'), _device_override is used directly.
 
-        Args:
-            device_type: Generic type like 'psu', 'dmm', 'scope', 'awg', 'dds'
-
-        Returns:
-            Specific device name like 'psu_matrix', 'scope', 'awg', 'dds' or None if not found
+        Returns the assigned device name string, or None if not found.
         """
-        # Map generic types to possible specific names
-        type_map = {
-            'psu': ['psu', 'psu_matrix'],
-            'dmm': ['dmm', 'dmm_owon'],
-            'scope': ['scope'],
-            'awg': ['awg', 'dds'],
-            'dds': ['dds', 'awg'],
-        }
+        import re
 
-        if device_type not in type_map:
-            return device_type  # Not a generic type, return as-is
+        # If a specific device was pre-selected by default() routing, use it directly
+        if self._device_override and self._device_override in self.devices:
+            return self._device_override
 
-        # Find all available devices of this type
-        candidates = [name for name in type_map[device_type] if name in self.devices]
+        # Build candidate list dynamically: names matching ^<type>\d*$
+        pattern = re.compile(rf'^{re.escape(device_type)}\d*$')
+        candidates = [name for name in self.devices if pattern.match(name)]
+
+        # Legacy: 'awg' command also matches old 'dds' key (JDS6600)
+        if device_type == 'awg' and 'dds' in self.devices and 'dds' not in candidates:
+            candidates.append('dds')
 
         if not candidates:
             ColorPrinter.warning(f"No {device_type.upper()} found. Run 'scan' first.")
             return None
 
-        # If only one device, use it automatically
         if len(candidates) == 1:
             return candidates[0]
 
-        # Multiple devices exist - check preference
-        if device_type in self._device_type_prefs:
-            preferred = self._device_type_prefs[device_type]
-            if preferred in candidates:
-                return preferred
-
-        # Ask user to choose
-        print(f"\nMultiple {device_type.upper()}s found:")
-        for i, name in enumerate(candidates, 1):
-            dev = self.devices[name]
-            # Try to get a friendly name or model
-            try:
-                idn = dev.get_idn() if hasattr(dev, 'get_idn') else name
-                print(f"  {i}. {name} ({idn})")
-            except:
-                print(f"  {i}. {name}")
-
-        while True:
-            choice = input(f"\nSelect {device_type.upper()} (1-{len(candidates)}, or device name): ").strip()
-
-            # Check if they entered a number
-            try:
-                idx = int(choice) - 1
-                if 0 <= idx < len(candidates):
-                    selected = candidates[idx]
-                    self._device_type_prefs[device_type] = selected
-                    ColorPrinter.success(f"Using {selected} for {device_type} commands")
-                    return selected
-            except ValueError:
-                pass
-
-            # Check if they entered a device name
-            if choice in candidates:
-                self._device_type_prefs[device_type] = choice
-                ColorPrinter.success(f"Using {choice} for {device_type} commands")
-                return choice
-
-            ColorPrinter.warning(f"Invalid choice. Enter 1-{len(candidates)} or device name.")
-
+        # Multiple devices — require explicit naming
+        ColorPrinter.warning(
+            f"Multiple {device_type.upper()}s found: {candidates}. "
+            f"Use explicit name, e.g. '{candidates[0]}'."
+        )
         return None
 
     def _parse_args(self, arg):
@@ -239,6 +217,20 @@ class InstrumentRepl(cmd.Cmd):
         except ValueError as exc:
             ColorPrinter.error(f"Parse error: {exc}")
             return []
+
+    def _channels_for_device(self, dev, base_type: str):
+        """Return the list of channel numbers for a device, or None if not applicable."""
+        if hasattr(dev, 'CHANNEL_MAP'):
+            return sorted(dev.CHANNEL_MAP.keys())
+        if base_type == 'scope':
+            return list(range(1, getattr(dev, 'num_channels', 4) + 1))
+        if base_type == 'psu':
+            if 'E3631A' in type(dev).__name__:
+                return [1, 2, 3]
+            return [1]
+        if 'JDS6600' in type(dev).__name__:
+            return [1, 2]
+        return None
 
     def _load_scripts(self, path: Optional[str] = None):
         target = path or self._scripts_path
@@ -541,6 +533,7 @@ class InstrumentRepl(cmd.Cmd):
         return False
 
     def _onecmd_single(self, line):
+        import re
         tokens = self._parse_args(line)
         if len(tokens) >= 3 and tokens[0].lower() == "repeat":
             try:
@@ -552,6 +545,38 @@ class InstrumentRepl(cmd.Cmd):
                 if super().onecmd(cmd_line):
                     return True
             return False
+
+        # Expand 'all' channel token into one call per channel
+        # e.g. "awg wave all sine freq=1000" → "awg wave 1 sine ..." + "awg wave 2 sine ..."
+        all_indices = [i for i, t in enumerate(tokens) if t.lower() == 'all']
+        if all_indices:
+            cmd_token = tokens[0].lower() if tokens else ''
+            base_type = re.sub(r'\d+$', '', cmd_token)
+            if base_type in ('awg', 'scope', 'psu', 'dds'):
+                dev = None
+                if self._device_override and self._device_override in self.devices:
+                    dev = self.devices[self._device_override]
+                elif cmd_token in self.devices:
+                    dev = self.devices[cmd_token]
+                else:
+                    pattern = re.compile(rf'^{re.escape(base_type)}\d*$')
+                    for dname, d in self.devices.items():
+                        if pattern.match(dname):
+                            dev = d
+                            break
+                    if dev is None and base_type == 'awg' and 'dds' in self.devices:
+                        dev = self.devices['dds']
+                if dev is not None:
+                    channels = self._channels_for_device(dev, base_type)
+                    if channels:
+                        all_idx = all_indices[0]
+                        for ch in channels:
+                            new_tokens = list(tokens)
+                            new_tokens[all_idx] = str(ch)
+                            if super().onecmd(' '.join(new_tokens)):
+                                return True
+                        return False
+
         return super().onecmd(line)
 
     def onecmd(self, line):
@@ -621,34 +646,31 @@ class InstrumentRepl(cmd.Cmd):
     def _safe_all(self):
         for name, dev in self.devices.items():
             try:
-                # PSU devices (psu, psu_matrix)
+                # PSU devices (psu, psu1, psu2, ...)
                 if name.startswith("psu"):
                     if hasattr(dev, 'disable_all_channels'):
                         dev.disable_all_channels()
                     elif hasattr(dev, 'enable_output'):
                         dev.enable_output(False)
-                # External AWG/DDS (awg, dds)
-                elif name in ("awg", "dds"):
+                # AWG/DDS devices (awg, awg1, awg2, dds)
+                elif name.startswith("awg") or name == "dds":
                     if hasattr(dev, 'disable_all_channels'):
                         dev.disable_all_channels()
                     elif hasattr(dev, 'enable_output'):
                         dev.enable_output(ch1=False, ch2=False)
-                # Oscilloscope
-                elif name == "scope":
-                    # Stop acquisition
+                # Oscilloscope (scope, scope1, scope2, ...)
+                elif name.startswith("scope"):
                     if hasattr(dev, 'stop'):
                         dev.stop()
-                    # Disable all channels
                     if hasattr(dev, 'disable_all_channels'):
                         dev.disable_all_channels()
                     elif hasattr(dev, 'disable_channel'):
-                        # Disable channels 1-4 individually
                         for ch in range(1, 5):
                             try:
                                 dev.disable_channel(ch)
-                            except:
-                                pass  # Some scopes may have fewer channels
-                # DMM devices (dmm, dmm_owon)
+                            except Exception:
+                                pass
+                # DMM devices (dmm, dmm1, dmm2, ...)
                 elif name.startswith("dmm"):
                     if hasattr(dev, 'reset'):
                         dev.reset()
@@ -667,35 +689,32 @@ class InstrumentRepl(cmd.Cmd):
     def _off_all(self):
         for name, dev in self.devices.items():
             try:
-                # PSU devices (psu, psu_matrix)
+                # PSU devices (psu, psu1, psu2, ...)
                 if name.startswith("psu"):
                     if hasattr(dev, 'enable_output'):
                         dev.enable_output(False)
                         ColorPrinter.success(f"{name}: output disabled")
-                # External AWG/DDS (awg, dds)
-                elif name in ("awg", "dds"):
-                    if hasattr(dev, 'enable_output'):
-                        dev.enable_output(ch1=False, ch2=False)
-                        ColorPrinter.success(f"{name}: outputs disabled")
-                    elif hasattr(dev, 'disable_all_channels'):
+                # AWG/DDS devices (awg, awg1, awg2, dds)
+                elif name.startswith("awg") or name == "dds":
+                    if hasattr(dev, 'disable_all_channels'):
                         dev.disable_all_channels()
                         ColorPrinter.success(f"{name}: channels disabled")
-                # Oscilloscope
-                elif name == "scope":
-                    # Stop acquisition first
+                    elif hasattr(dev, 'enable_output'):
+                        dev.enable_output(ch1=False, ch2=False)
+                        ColorPrinter.success(f"{name}: outputs disabled")
+                # Oscilloscope (scope, scope1, scope2, ...)
+                elif name.startswith("scope"):
                     if hasattr(dev, 'stop'):
                         dev.stop()
                         ColorPrinter.success(f"{name}: acquisition stopped")
-                    # Then disable channels
                     if hasattr(dev, 'disable_all_channels'):
                         dev.disable_all_channels()
                         ColorPrinter.success(f"{name}: channels disabled")
                     elif hasattr(dev, 'disable_channel'):
-                        # Disable all 4 channels individually
                         for ch in range(1, 5):
                             dev.disable_channel(ch)
                         ColorPrinter.success(f"{name}: all channels (1-4) disabled")
-                # DMM devices (dmm, dmm_owon)
+                # DMM devices (dmm, dmm1, dmm2, ...)
                 elif name.startswith("dmm"):
                     if hasattr(dev, 'reset'):
                         dev.reset()
@@ -706,28 +725,26 @@ class InstrumentRepl(cmd.Cmd):
     def _on_all(self):
         for name, dev in self.devices.items():
             try:
-                # PSU devices (psu, psu_matrix)
+                # PSU devices (psu, psu1, psu2, ...)
                 if name.startswith("psu"):
                     if hasattr(dev, 'enable_output'):
                         dev.enable_output(True)
                         ColorPrinter.success(f"{name}: output enabled")
-                # External AWG/DDS (awg, dds)
-                elif name in ("awg", "dds"):
+                # AWG/DDS devices (awg, awg1, awg2, dds)
+                elif name.startswith("awg") or name == "dds":
                     if hasattr(dev, 'enable_output'):
-                        # Try different enable_output signatures
                         try:
                             dev.enable_output(ch1=True, ch2=True)
                         except TypeError:
-                            # Fallback for devices with different API
                             dev.enable_output(1, True)
                             dev.enable_output(2, True)
                         ColorPrinter.success(f"{name}: outputs enabled")
-                # Oscilloscope
-                elif name == "scope":
+                # Oscilloscope (scope, scope1, scope2, ...)
+                elif name.startswith("scope"):
                     if hasattr(dev, 'enable_all_channels'):
                         dev.enable_all_channels()
                         ColorPrinter.success(f"{name}: channels enabled")
-                # DMM devices - no "on" state, skip
+                # DMM devices - no "on" state
                 elif name.startswith("dmm"):
                     ColorPrinter.info(f"{name}: no output to enable")
             except Exception as exc:
@@ -743,6 +760,21 @@ class InstrumentRepl(cmd.Cmd):
             self._print_usage(["scan  # rescan and connect to instruments"])
             return
         self.scan()
+
+    def do_reload(self, arg):
+        "reload: restart the REPL process to pick up changes to repl.py and lab_instruments"
+        import os
+        import sys
+
+        ColorPrinter.info("Disconnecting all instruments...")
+        for dev in list(self.devices.values()):
+            try:
+                dev.disconnect()
+            except Exception:
+                pass
+
+        ColorPrinter.success("Restarting process...")
+        os.execv(sys.executable, [sys.executable] + sys.argv)
 
     def do_list(self, arg):
         "list: show connected instruments"
@@ -772,6 +804,27 @@ class InstrumentRepl(cmd.Cmd):
             return
         self.selected = name
         ColorPrinter.success(f"Selected: {name}")
+
+    def default(self, line):
+        """Handle numbered device names like 'awg1', 'scope2', 'psu1', 'dmm3'."""
+        import re
+        parts = line.split(None, 1)
+        cmd_token = parts[0]
+        rest = parts[1] if len(parts) > 1 else ""
+
+        if cmd_token in self.devices:
+            # Strip trailing digits to get the base type ("awg1" → "awg")
+            base_type = re.sub(r'\d+$', '', cmd_token)
+            handler = getattr(self, f"do_{base_type}", None)
+            if handler:
+                self._device_override = cmd_token
+                try:
+                    handler(rest)
+                finally:
+                    self._device_override = None
+                return
+
+        print(f"*** Unknown syntax: {line}")
 
     def do_idn(self, arg):
         "idn [name]: query *IDN? for selected or named instrument"
@@ -873,7 +926,7 @@ class InstrumentRepl(cmd.Cmd):
             return
 
         try:
-            if name == "psu":
+            if name.startswith("psu"):
                 if state in ("safe", "off"):
                     dev.disable_all_channels()
                 elif state == "on":
@@ -882,7 +935,7 @@ class InstrumentRepl(cmd.Cmd):
                     dev.reset()
                 else:
                     ColorPrinter.warning("PSU states: on, off, safe, reset")
-            elif name == "awg":
+            elif name.startswith("awg") or name == "dds":
                 if state in ("safe", "off"):
                     dev.disable_all_channels()
                 elif state == "on":
@@ -892,7 +945,7 @@ class InstrumentRepl(cmd.Cmd):
                     dev.reset()
                 else:
                     ColorPrinter.warning("AWG states: on, off, safe, reset")
-            elif name == "scope":
+            elif name.startswith("scope"):
                 if state in ("safe", "off"):
                     dev.disable_all_channels()
                 elif state == "on":
@@ -901,7 +954,7 @@ class InstrumentRepl(cmd.Cmd):
                     dev.reset()
                 else:
                     ColorPrinter.warning("Scope states: on, off, safe, reset")
-            elif name == "dmm":
+            elif name.startswith("dmm"):
                 if state in ("safe", "reset"):
                     dev.reset()
                 else:
@@ -1647,31 +1700,24 @@ class InstrumentRepl(cmd.Cmd):
         args, help_flag = self._strip_help(args)
 
         if not args or help_flag:
-            self._print_usage(
+            self._print_colored_usage(
                 [
-                    "# UNIFIED AWG COMMANDS (works with all AWG/DDS models)",
+                    "# AWG COMMANDS (works with all AWG/DDS models)",
                     "",
-                    "awg output <1|2|ch1|ch2|both> on|off  - enable/disable channels",
-                    "awg wave <1|2> <type> [freq=] [amp=] [offset=] [duty=] [phase=]",
+                    "awg chan <1|2|all> on|off",
+                    "awg wave <1|2|all> <type> [freq=] [amp=] [offset=] [duty=] [phase=]",
                     "  - type: sine|square|ramp|triangle|pulse|noise|dc|arb",
                     "  - example: awg wave 1 sine freq=1000 amp=5.0 offset=2.5",
+                    "  - example: awg wave all sine freq=1000",
                     "",
-                    "awg freq <1|2> <Hz>  - set frequency",
-                    "awg amp <1|2> <Vpp>  - set amplitude",
-                    "awg offset <1|2> <V>  - set DC offset",
-                    "awg duty <1|2> <%>  - set duty cycle",
-                    "awg phase <1|2> <deg>  - set phase",
+                    "awg freq <1|2|all> <Hz>",
+                    "awg amp <1|2|all> <Vpp>",
+                    "awg offset <1|2|all> <V>",
+                    "awg duty <1|2|all> <%>",
+                    "awg phase <1|2|all> <deg>",
                     "",
-                    "awg dc <1|2> <voltage>  - set DC output",
-                    "awg sync <1|2> on|off  - control sync output (if available)",
+                    "awg sync on|off",
                     "awg state on|off|safe|reset",
-                    "",
-                    "Examples:",
-                    "  awg wave 1 sine",
-                    "  awg freq 1 1000",
-                    "  awg amp 1 5.0",
-                    "  awg output 1 on",
-                    "  awg wave 2 square freq=1000 amp=3.3 duty=25",
                 ]
             )
             return
@@ -1679,53 +1725,41 @@ class InstrumentRepl(cmd.Cmd):
         cmd_name = args[0].lower()
 
         try:
-            # UNIFIED OUTPUT COMMAND - accepts both "1" and "ch1" format
-            if cmd_name == "output" and len(args) >= 3:
+            # CHAN COMMAND — enable/disable a channel output
+            if cmd_name == "chan" and len(args) >= 3:
                 channel_str = args[1].lower()
                 state = args[2].lower() == "on"
 
-                # Normalize channel specification
                 if channel_str in ("ch1", "1"):
                     channel = 1
                 elif channel_str in ("ch2", "2"):
                     channel = 2
-                elif channel_str == "both":
-                    channel = "both"
                 else:
-                    ColorPrinter.error("Channel must be '1', '2', 'ch1', 'ch2', or 'both'")
+                    ColorPrinter.error("Channel must be '1', '2', 'ch1', or 'ch2'")
                     return
 
-                # Call appropriate device method
                 if is_jds6600:
-                    if channel == "both":
-                        dev.enable_output(ch1=state, ch2=state)
-                    elif channel == 1:
-                        dev.enable_output(ch1=state, ch2=None)
-                    else:
-                        dev.enable_output(ch1=None, ch2=state)
+                    dev.enable_output(
+                        ch1=state if channel == 1 else None,
+                        ch2=state if channel == 2 else None,
+                    )
                 else:
-                    if channel == "both":
-                        dev.enable_output(1, state)
-                        dev.enable_output(2, state)
-                    else:
-                        dev.enable_output(channel, state)
+                    dev.enable_output(channel, state)
+                ColorPrinter.success(f"CH{channel}: {'on' if state else 'off'}")
 
-            # UNIFIED WAVE COMMAND - accepts both inline parameters and separate commands
+            # WAVE COMMAND
             elif cmd_name == "wave" and len(args) >= 3:
                 channel = int(args[1])
                 waveform = args[2].lower()
 
-                # Parse optional key=value parameters
                 params = {}
                 for token in args[3:]:
                     if "=" in token:
                         key, value = token.split("=", 1)
                         params[key.lower()] = float(value)
 
-                # Apply waveform
                 if is_jds6600:
                     dev.set_waveform(channel, waveform)
-                    # Apply additional parameters if provided
                     if "freq" in params or "frequency" in params:
                         dev.set_frequency(channel, params.get("freq", params.get("frequency")))
                     if "amp" in params or "amplitude" in params:
@@ -1737,93 +1771,89 @@ class InstrumentRepl(cmd.Cmd):
                     if "phase" in params:
                         dev.set_phase(channel, params["phase"])
                 else:
-                    # BK AWG style with kwargs
+                    # Normalize to SCPI abbreviations: "sine" → "SIN", "square" → "SQU", etc.
+                    scpi_wave = AWG_WAVE_ALIASES.get(waveform, waveform.upper())
                     kwargs = {}
                     for key, value in params.items():
                         mapped_key = AWG_WAVE_KEYS.get(key)
                         if mapped_key:
                             kwargs[mapped_key] = value
-                    dev.set_waveform(channel, waveform, **kwargs)
+                    dev.set_waveform(channel, scpi_wave, **kwargs)
 
-            # UNIFIED FREQ COMMAND
+                param_str = "  " + "  ".join(f"{k}={v}" for k, v in params.items()) if params else ""
+                ColorPrinter.success(f"CH{channel}: {AWG_WAVE_ALIASES.get(waveform, waveform.upper())}{param_str}")
+
+            # FREQ COMMAND
             elif cmd_name == "freq" and len(args) >= 3:
                 channel = int(args[1])
                 frequency = float(args[2])
                 if is_jds6600:
                     dev.set_frequency(channel, frequency)
+                elif hasattr(dev, 'set_frequency'):
+                    dev.set_frequency(channel, frequency)
                 else:
-                    # For BK AWG, get current waveform and update freq
-                    # This may require storing waveform state or using a simpler approach
-                    if hasattr(dev, 'set_frequency'):
-                        dev.set_frequency(channel, frequency)
-                    else:
-                        ColorPrinter.warning("Frequency adjustment not supported independently. Use 'awg wave' with freq= parameter.")
+                    ColorPrinter.warning("Frequency not supported independently. Use 'awg wave' with freq=")
+                    return
+                ColorPrinter.success(f"CH{channel}: {frequency} Hz")
 
-            # UNIFIED AMP COMMAND
+            # AMP COMMAND
             elif cmd_name == "amp" and len(args) >= 3:
                 channel = int(args[1])
                 amplitude = float(args[2])
                 if is_jds6600:
                     dev.set_amplitude(channel, amplitude)
+                elif hasattr(dev, 'set_amplitude'):
+                    dev.set_amplitude(channel, amplitude)
                 else:
-                    if hasattr(dev, 'set_amplitude'):
-                        dev.set_amplitude(channel, amplitude)
-                    else:
-                        ColorPrinter.warning("Amplitude adjustment not supported independently. Use 'awg wave' with amp= parameter.")
+                    ColorPrinter.warning("Amplitude not supported independently. Use 'awg wave' with amp=")
+                    return
+                ColorPrinter.success(f"CH{channel}: {amplitude} Vpp")
 
-            # UNIFIED OFFSET COMMAND
+            # OFFSET COMMAND
             elif cmd_name == "offset" and len(args) >= 3:
                 channel = int(args[1])
                 offset = float(args[2])
                 if is_jds6600:
                     dev.set_offset(channel, offset)
+                elif hasattr(dev, 'set_offset'):
+                    dev.set_offset(channel, offset)
                 else:
-                    if hasattr(dev, 'set_offset'):
-                        dev.set_offset(channel, offset)
-                    else:
-                        ColorPrinter.warning("Offset adjustment not supported independently. Use 'awg wave' with offset= parameter.")
+                    ColorPrinter.warning("Offset not supported independently. Use 'awg wave' with offset=")
+                    return
+                ColorPrinter.success(f"CH{channel}: offset {offset} V")
 
-            # UNIFIED DUTY COMMAND
+            # DUTY COMMAND
             elif cmd_name == "duty" and len(args) >= 3:
                 channel = int(args[1])
                 duty = float(args[2])
                 if is_jds6600:
                     dev.set_duty_cycle(channel, duty)
+                elif hasattr(dev, 'set_duty_cycle'):
+                    dev.set_duty_cycle(channel, duty)
                 else:
-                    if hasattr(dev, 'set_duty_cycle'):
-                        dev.set_duty_cycle(channel, duty)
-                    else:
-                        ColorPrinter.warning("Duty cycle adjustment not supported independently. Use 'awg wave' with duty= parameter.")
+                    ColorPrinter.warning("Duty cycle not supported independently. Use 'awg wave' with duty=")
+                    return
+                ColorPrinter.success(f"CH{channel}: duty {duty}%")
 
-            # UNIFIED PHASE COMMAND
+            # PHASE COMMAND
             elif cmd_name == "phase" and len(args) >= 3:
                 channel = int(args[1])
                 phase = float(args[2])
                 if is_jds6600:
                     dev.set_phase(channel, phase)
+                elif hasattr(dev, 'set_phase'):
+                    dev.set_phase(channel, phase)
                 else:
-                    if hasattr(dev, 'set_phase'):
-                        dev.set_phase(channel, phase)
-                    else:
-                        ColorPrinter.warning("Phase adjustment not supported independently. Use 'awg wave' with phase= parameter.")
+                    ColorPrinter.warning("Phase not supported independently. Use 'awg wave' with phase=")
+                    return
+                ColorPrinter.success(f"CH{channel}: phase {phase} deg")
 
-            # DC OUTPUT COMMAND
-            elif cmd_name == "dc" and len(args) >= 3:
-                channel = int(args[1])
-                voltage = float(args[2])
-                if is_jds6600:
-                    # For JDS6600, use wave command with DC and offset
-                    dev.set_waveform(channel, "dc")
-                    dev.set_offset(channel, voltage)
-                else:
-                    dev.set_dc_output(channel, voltage)
-
-            # SYNC COMMAND (if available)
-            elif cmd_name == "sync" and len(args) >= 3:
-                channel = int(args[1])
-                state = args[2].lower() == "on"
+            # SYNC COMMAND
+            elif cmd_name == "sync" and len(args) >= 2:
+                state = args[1].lower() == "on"
                 if hasattr(dev, 'set_sync_output'):
-                    dev.set_sync_output(channel, state)
+                    dev.set_sync_output(state)
+                    ColorPrinter.success(f"Sync: {'on' if state else 'off'}")
                 else:
                     ColorPrinter.warning("Sync output not available on this device.")
 
@@ -2420,10 +2450,11 @@ class InstrumentRepl(cmd.Cmd):
                     "scope stop - pause acquisition (freeze current display)",
                     "scope single - arm single-shot trigger (capture one event and stop)",
                     "",
-                    "scope chan <1-4> on|off",
-                    "scope coupling <1-4> <DC|AC|GND>",
+                    "scope chan <1-4|all> on|off",
+                    "scope coupling <1-4|all> <DC|AC|GND>",
                     "  - example: scope coupling 1 AC",
-                    "scope probe <1-4> <attenuation> - set probe attenuation (1, 10, 100, etc.)",
+                    "  - example: scope coupling all DC",
+                    "scope probe <1-4|all> <attenuation> - set probe attenuation (1, 10, 100, etc.)",
                     "  - example: scope probe 1 10",
                     "",
                     "scope hscale <seconds_per_div>",
@@ -2431,19 +2462,20 @@ class InstrumentRepl(cmd.Cmd):
                     "scope hpos <percentage> - set horizontal position (0-100%)",
                     "scope hmove <delta> - move horizontal position by delta",
                     "",
-                    "scope vscale <1-4> <volts_per_div> [pos]",
+                    "scope vscale <1-4|all> <volts_per_div> [pos]",
                     "  - example: scope vscale 1 0.5 0",
-                    "scope vpos <1-4> <divisions> - set vertical position",
-                    "scope vmove <1-4> <delta> - move vertical position by delta",
+                    "  - example: scope vscale all 1.0",
+                    "scope vpos <1-4|all> <divisions> - set vertical position",
+                    "scope vmove <1-4|all> <delta> - move vertical position by delta",
                     "",
                     "scope trigger <chan> <level> [slope=RISE] [mode=AUTO]",
                     "",
-                    "scope measure <1-4> <type> - measure waveform parameter",
+                    "scope measure <1-4|all> <type> - measure waveform parameter",
                     "  - types: FREQUENCY, PK2PK, RMS, MEAN, PERIOD, MINIMUM, MAXIMUM",
                     "  - types: RISE, FALL, AMPLITUDE, HIGH, LOW, PWIDTH, NWIDTH, CRMS",
                     "  - example: scope measure 1 FREQUENCY",
-                    "  - example: scope measure 2 PK2PK",
-                    "scope measure_store <1-4> <type> <label> [unit=]",
+                    "  - example: scope measure all PK2PK",
+                    "scope measure_store <1-4|all> <type> <label> [unit=]",
                     "scope measure_delay <ch1> <ch2> [edge1=RISE] [edge2=RISE] [direction=FORWARDS]",
                     "scope measure_delay_store <ch1> <ch2> <label> [edge1=RISE] [edge2=RISE] [direction=FORWARDS] [unit=]",
                     "",
@@ -2475,22 +2507,27 @@ class InstrumentRepl(cmd.Cmd):
                 ColorPrinter.success("Autoset complete")
             elif cmd_name == "run":
                 dev.run()
+                ColorPrinter.success("Acquisition running")
             elif cmd_name == "stop":
                 dev.stop()
+                ColorPrinter.success("Acquisition stopped")
             elif cmd_name == "single":
                 dev.single()
+                ColorPrinter.success("Single shot armed")
             elif cmd_name == "chan" and len(args) >= 3:
                 channel = int(args[1])
-                if args[2].lower() == "on":
+                enable = args[2].lower() == "on"
+                if enable:
                     dev.enable_channel(channel)
-                    ColorPrinter.success(f"CH{channel} enabled")
+                    ColorPrinter.success(f"CH{channel}: on")
                 else:
                     dev.disable_channel(channel)
-                    ColorPrinter.info(f"CH{channel} disabled")
+                    ColorPrinter.info(f"CH{channel}: off")
             elif cmd_name == "coupling" and len(args) >= 3:
                 channel = int(args[1])
                 coupling_type = args[2].upper()
                 dev.set_coupling(channel, coupling_type)
+                ColorPrinter.success(f"CH{channel}: coupling {coupling_type}")
             elif cmd_name == "probe" and len(args) >= 3:
                 channel = int(args[1])
                 attenuation = float(args[2])
@@ -2507,6 +2544,7 @@ class InstrumentRepl(cmd.Cmd):
             elif cmd_name == "hmove" and len(args) >= 2:
                 delta = float(args[1])
                 dev.move_horizontal(delta)
+                ColorPrinter.success(f"Horizontal position moved by {delta}")
             elif cmd_name == "vscale" and len(args) >= 3:
                 channel = int(args[1])
                 scale = float(args[2])
@@ -2522,6 +2560,7 @@ class InstrumentRepl(cmd.Cmd):
                 channel = int(args[1])
                 delta = float(args[2])
                 dev.move_vertical(channel, delta)
+                ColorPrinter.success(f"CH{channel}: moved {delta} div")
             elif cmd_name == "trigger" and len(args) >= 3:
                 channel = int(args[1])
                 level = float(args[2])
@@ -2571,7 +2610,7 @@ class InstrumentRepl(cmd.Cmd):
                         unit = token.split("=", 1)[1]
                 val = dev.measure_bnf(channel, measure_type)
                 self._record_measurement(label, val, unit, f"scope.meas.{measure_type}")
-                print(val)
+                ColorPrinter.success(f"CH{channel} {measure_type}: {val} → stored as '{label}'")
             elif cmd_name == "measure_delay" and len(args) >= 3:
                 ch1 = int(args[1])
                 ch2 = int(args[2])
@@ -2644,7 +2683,7 @@ class InstrumentRepl(cmd.Cmd):
             elif cmd_name == "dvm":
                 self._handle_scope_dvm(dev, args[1:])
             elif cmd_name == "state" and len(args) >= 2:
-                self.do_state(f"scope {args[1]}")
+                self.do_state(f"{scope_name} {args[1]}")
             else:
                 ColorPrinter.warning("Unknown scope command. Type 'scope' for help.")
         except Exception as exc:
