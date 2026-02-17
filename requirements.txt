@@ -1,3 +1,6 @@
+# Install the instrument drivers package from this repo
+-e ./lab_instruments
+
 # VISA instrument control
 pyserial>=3.5
 pyserial-asyncio>=0.6

@@ -48,9 +48,24 @@ from lab_instruments import InstrumentDiscovery, HP_E3631A, Tektronix_MSO2024
 
 The REPL lets you discover connected instruments and send commands interactively. It also saves and replays command sequences (useful for automating repetitive lab steps).
 
+**Using it from this repo (simplest):**
 ```bash
 python repl.py
 ```
+
+**Using it from your own personal lab repo:**
+
+After running setup, `lab_instruments` is installed in your venv as a proper package. That means you can copy `repl.py` into your personal repo and run it from there — `.repl_scripts.json` will be saved in your repo's root directory where it belongs.
+
+```bash
+# One-time: copy repl.py to your personal repo
+cp repl.py ~/your-lab-repo/repl.py
+
+# Then from your personal repo root (venv active):
+python repl.py
+```
+
+The only requirement is that `lab_instruments` is installed in whichever venv you're using. Running `setup.ps1` / `setup.py` from this toolkit repo handles that.
 
 Common commands:
 ```
