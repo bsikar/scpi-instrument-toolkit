@@ -2,9 +2,10 @@
 Driver for Owon XDM1041 Digital Multimeter
 Instrument Type: 7½-digit bench DMM
 
-NOTE: This device uses non-standard SCPI syntax:
-- Configuration uses standard SCPI (:CONFigure:VOLTage:DC, etc.)
+NOTE: Non-standard SCPI implementation:
+- Range is passed as a parameter to CONFigure commands (SENSe:*:RANGe not supported)
 - Measurement uses simplified syntax (MEAS? instead of :READ?)
+- Run/Stop is hardware-only; no SCPI command exists to control it remotely
 """
 
 from .device_manager import DeviceManager
@@ -16,13 +17,16 @@ class Owon_XDM1041(DeviceManager):
     Driver for Owon XDM1041 7½-digit Digital Multimeter.
 
     Features:
-    - DC/AC Voltage measurement (up to 1000V)
+    - DC/AC Voltage measurement (up to 1000V DC, 750V AC)
     - DC/AC Current measurement (up to 10A)
-    - 2-wire and 4-wire resistance
-    - Frequency, capacitance, temperature
+    - 2-wire and 4-wire resistance (4-wire max 50kΩ)
+    - Frequency, period, capacitance, temperature, diode, continuity
     - 7½ digits resolution
 
-    IMPORTANT: Uses non-standard measurement syntax (MEAS? instead of :READ?)
+    IMPORTANT: Non-standard SCPI implementation:
+    - Range is passed directly to CONFigure commands, not via SENSe subsystem
+    - Measurement uses MEAS? (not :READ?)
+    - Run/Stop cannot be controlled via SCPI (physical button only)
     """
 
     def __init__(self, resource_name):
@@ -50,7 +54,6 @@ class Owon_XDM1041(DeviceManager):
         import time
         self.reset()
         time.sleep(0.5)  # Device needs time after reset
-        self.clear_status()
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
@@ -67,13 +70,13 @@ class Owon_XDM1041(DeviceManager):
 
         Args:
             range_val (float, optional): Voltage range in volts.
+                                        Valid: 500e-3, 5, 50, 500, 1000
                                         If None, uses auto-range.
         """
-        self.send_command(":CONFigure:VOLTage:DC")
         if range_val is None:
-            self.send_command(":SENSe:VOLTage:DC:RANGe:AUTO ON")
+            self.send_command("CONFigure:VOLTage:DC AUTO")
         else:
-            self.send_command(f":SENSe:VOLTage:DC:RANGe {range_val}")
+            self.send_command(f"CONFigure:VOLTage:DC {range_val}")
 
     def configure_ac_voltage(self, range_val: float = None):
         """
@@ -81,13 +84,13 @@ class Owon_XDM1041(DeviceManager):
 
         Args:
             range_val (float, optional): Voltage range in volts.
+                                        Valid: 500e-3, 5, 50, 500, 750
                                         If None, uses auto-range.
         """
-        self.send_command(":CONFigure:VOLTage:AC")
         if range_val is None:
-            self.send_command(":SENSe:VOLTage:AC:RANGe:AUTO ON")
+            self.send_command("CONFigure:VOLTage:AC AUTO")
         else:
-            self.send_command(f":SENSe:VOLTage:AC:RANGe {range_val}")
+            self.send_command(f"CONFigure:VOLTage:AC {range_val}")
 
     def configure_dc_current(self, range_val: float = None):
         """
@@ -95,13 +98,13 @@ class Owon_XDM1041(DeviceManager):
 
         Args:
             range_val (float, optional): Current range in amps.
+                                        Valid: 500e-6, 5e-3, 50e-3, 500e-3, 5, 10
                                         If None, uses auto-range.
         """
-        self.send_command(":CONFigure:CURRent:DC")
         if range_val is None:
-            self.send_command(":SENSe:CURRent:DC:RANGe:AUTO ON")
+            self.send_command("CONFigure:CURRent:DC AUTO")
         else:
-            self.send_command(f":SENSe:CURRent:DC:RANGe {range_val}")
+            self.send_command(f"CONFigure:CURRent:DC {range_val}")
 
     def configure_ac_current(self, range_val: float = None):
         """
@@ -109,13 +112,13 @@ class Owon_XDM1041(DeviceManager):
 
         Args:
             range_val (float, optional): Current range in amps.
+                                        Valid: 500e-6, 5e-3, 50e-3, 500e-3, 5, 10
                                         If None, uses auto-range.
         """
-        self.send_command(":CONFigure:CURRent:AC")
         if range_val is None:
-            self.send_command(":SENSe:CURRent:AC:RANGe:AUTO ON")
+            self.send_command("CONFigure:CURRent:AC AUTO")
         else:
-            self.send_command(f":SENSe:CURRent:AC:RANGe {range_val}")
+            self.send_command(f"CONFigure:CURRent:AC {range_val}")
 
     def configure_resistance_2wire(self, range_val: float = None):
         """
@@ -123,31 +126,37 @@ class Owon_XDM1041(DeviceManager):
 
         Args:
             range_val (float, optional): Resistance range in ohms.
+                                        Valid: 500, 5e3, 50e3, 500e3, 5e6, 50e6
                                         If None, uses auto-range.
         """
-        self.send_command(":CONFigure:RESistance")
         if range_val is None:
-            self.send_command(":SENSe:RESistance:RANGe:AUTO ON")
+            self.send_command("CONFigure:RESistance AUTO")
         else:
-            self.send_command(f":SENSe:RESistance:RANGe {range_val}")
+            self.send_command(f"CONFigure:RESistance {range_val}")
 
     def configure_resistance_4wire(self, range_val: float = None):
         """
         Configure for 4-wire resistance measurement.
 
+        Note: Maximum range is 50kΩ.
+
         Args:
             range_val (float, optional): Resistance range in ohms.
+                                        Valid: 500, 5e3, 50e3
                                         If None, uses auto-range.
         """
-        self.send_command(":CONFigure:FRESistance")
         if range_val is None:
-            self.send_command(":SENSe:FRESistance:RANGe:AUTO ON")
+            self.send_command("CONFigure:FRESistance AUTO")
         else:
-            self.send_command(f":SENSe:FRESistance:RANGe {range_val}")
+            self.send_command(f"CONFigure:FRESistance {range_val}")
 
     def configure_frequency(self):
         """Configure for frequency measurement."""
-        self.send_command(":CONFigure:FREQuency")
+        self.send_command("CONFigure:FREQuency")
+
+    def configure_period(self):
+        """Configure for period measurement."""
+        self.send_command("CONFigure:PERiod")
 
     def configure_capacitance(self, range_val: float = None):
         """
@@ -155,17 +164,30 @@ class Owon_XDM1041(DeviceManager):
 
         Args:
             range_val (float, optional): Capacitance range in farads.
+                                        Valid: 50e-9, 500e-9, 5e-6, 50e-6, 500e-6, 5e-3, 50e-3
                                         If None, uses auto-range.
         """
-        self.send_command(":CONFigure:CAPacitance")
         if range_val is None:
-            self.send_command(":SENSe:CAPacitance:RANGe:AUTO ON")
+            self.send_command("CONFigure:CAPacitance AUTO")
         else:
-            self.send_command(f":SENSe:CAPacitance:RANGe {range_val}")
+            self.send_command(f"CONFigure:CAPacitance {range_val}")
 
-    def configure_temperature(self):
-        """Configure for temperature measurement."""
-        self.send_command(":CONFigure:TEMPerature")
+    def configure_temperature(self, rtd_type: str = "KITS90"):
+        """
+        Configure for temperature measurement.
+
+        Args:
+            rtd_type (str): RTD sensor type. Valid: 'KITS90' (K-type, default), 'PT100'
+        """
+        self.send_command(f"CONFigure:TEMPerature:RTD {rtd_type}")
+
+    def configure_diode(self):
+        """Configure for diode measurement."""
+        self.send_command("CONFigure:DIODe")
+
+    def configure_continuity(self):
+        """Configure for continuity test."""
+        self.send_command("CONFigure:CONTinuity")
 
     # ========================================================================
     # Measurement Methods (using Owon's simplified syntax)
@@ -273,6 +295,16 @@ class Owon_XDM1041(DeviceManager):
         self.configure_frequency()
         return self.measure()
 
+    def measure_period(self) -> float:
+        """
+        Measure period.
+
+        Returns:
+            float: Period in seconds
+        """
+        self.configure_period()
+        return self.measure()
+
     def measure_capacitance(self, range_val: float = None) -> float:
         """
         Measure capacitance.
@@ -286,14 +318,27 @@ class Owon_XDM1041(DeviceManager):
         self.configure_capacitance(range_val)
         return self.measure()
 
-    def measure_temperature(self) -> float:
+    def measure_temperature(self, rtd_type: str = "KITS90") -> float:
         """
         Measure temperature.
+
+        Args:
+            rtd_type (str): RTD type. Valid: 'KITS90' (K-type, default), 'PT100'
 
         Returns:
             float: Temperature in degrees Celsius
         """
-        self.configure_temperature()
+        self.configure_temperature(rtd_type)
+        return self.measure()
+
+    def measure_diode(self) -> float:
+        """
+        Measure diode forward voltage.
+
+        Returns:
+            float: Diode voltage in volts
+        """
+        self.configure_diode()
         return self.measure()
 
     # ========================================================================
@@ -305,7 +350,8 @@ class Owon_XDM1041(DeviceManager):
         Set measurement mode (for compatibility with REPL).
 
         Args:
-            mode (str): Mode name (vdc, vac, idc, iac, res, fres, freq, cap, temp)
+            mode (str): Mode name (vdc, vac, idc, iac, res, fres, freq, per,
+                        cap, temp, diod, cont)
         """
         mode_map = {
             "vdc": self.configure_dc_voltage,
@@ -322,10 +368,16 @@ class Owon_XDM1041(DeviceManager):
             "resistance_4wire": self.configure_resistance_4wire,
             "freq": self.configure_frequency,
             "frequency": self.configure_frequency,
+            "per": self.configure_period,
+            "period": self.configure_period,
             "cap": self.configure_capacitance,
             "capacitance": self.configure_capacitance,
             "temp": self.configure_temperature,
             "temperature": self.configure_temperature,
+            "diod": self.configure_diode,
+            "diode": self.configure_diode,
+            "cont": self.configure_continuity,
+            "continuity": self.configure_continuity,
         }
 
         if mode.lower() not in mode_map:
@@ -344,17 +396,14 @@ class Owon_XDM1041(DeviceManager):
 
     def get_error(self) -> str:
         """
-        Read error queue.
+        Error query stub.
 
-        NOTE: Error queries may not work reliably on this device.
+        NOTE: SYSTem:ERRor? is not supported on the XDM1041.
 
         Returns:
-            str: Error message or indication that queries don't work
+            str: Not supported message
         """
-        try:
-            return self.query(":SYSTem:ERRor?")
-        except:
-            return "Error queries not supported by Owon XDM1041"
+        return "Error query not supported by Owon XDM1041"
 
     def __repr__(self):
         """String representation for debugging."""
