@@ -27,7 +27,7 @@ python repl.py
 
 **Linux/Mac:**
 ```bash
-python setup.py
+python setup_env.py
 python repl.py
 ```
 
